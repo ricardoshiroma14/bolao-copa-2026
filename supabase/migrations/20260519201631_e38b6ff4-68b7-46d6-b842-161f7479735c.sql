@@ -1,0 +1,3 @@
+-- Template note:
+-- The private app used this migration to clear bracket predictions for a real pool.
+-- It is intentionally a no-op in the public template.

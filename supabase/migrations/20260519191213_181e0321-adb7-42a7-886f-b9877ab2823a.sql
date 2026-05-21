@@ -1,0 +1,4 @@
+-- Template note:
+-- The private app used this migration for one-off pool cleanup.
+-- It is intentionally a no-op in the public template because deleting data by
+-- a hard-coded pool id is unsafe for reusable deployments.

@@ -1,0 +1,1 @@
+UPDATE public.teams SET name = 'República Tcheca' WHERE code = 'CZE';
