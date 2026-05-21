@@ -96,4 +96,4 @@ There is currently no automated test suite.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
