@@ -1,9 +1,7 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowLeft,
-  Copy,
   Calendar,
   BarChart3,
   Settings as SettingsIcon,
@@ -11,13 +9,13 @@ import {
   ListChecks,
   Wallet,
 } from "lucide-react";
-import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Button } from "@/components/ui/button";
 import { Header } from "@/components/Header";
 import { useAuth } from "@/lib/auth";
+import { useEffectiveAdmin } from "@/lib/admin-view";
 import { supabase } from "@/integrations/supabase/client";
+import { isBeforeMatchesRelease } from "@/lib/release-windows";
 import { MatchesTab } from "@/components/pool/MatchesTab";
 import { RankingTab } from "@/components/pool/RankingTab";
 import { BracketTab } from "@/components/pool/BracketTab";
@@ -33,10 +31,16 @@ function PoolPage() {
   const { id } = Route.useParams();
   const { user, loading } = useAuth();
   const navigate = useNavigate();
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     if (!loading && !user) navigate({ to: "/auth" });
   }, [user, loading, navigate]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const { data: pool, isLoading } = useQuery({
     queryKey: ["pool", id],
@@ -48,7 +52,41 @@ function PoolPage() {
     },
   });
 
-  const [tab, setTab] = useState("matches");
+  const { data: participantCount = 0 } = useQuery({
+    queryKey: ["pool-participant-count", id],
+    enabled: !!user,
+    queryFn: async () => {
+      const { count, error } = await supabase
+        .from("pool_members")
+        .select("*", { count: "exact", head: true })
+        .eq("pool_id", id);
+      if (error) throw error;
+      return count ?? 0;
+    },
+  });
+
+  const { data: isAdmin } = useQuery({
+    queryKey: ["is-admin", user?.id],
+    enabled: !!user,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", user!.id)
+        .eq("role", "admin")
+        .maybeSingle();
+      if (error) return false;
+      return !!data;
+    },
+  });
+
+  const [tab, setTab] = useState("predictions");
+  const effectiveIsAdmin = useEffectiveAdmin(isAdmin);
+  const showMatchesTab = !isBeforeMatchesRelease(now) || effectiveIsAdmin;
+
+  useEffect(() => {
+    if (!showMatchesTab && tab === "matches") setTab("predictions");
+  }, [showMatchesTab, tab]);
 
   if (isLoading)
     return (
@@ -70,40 +108,31 @@ function PoolPage() {
       <Header />
       <main className="mx-auto max-w-7xl px-4 py-8">
         <div className="mb-6 rounded-xl border border-border bg-card p-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-primary">
-                Bolão
-              </div>
-              <h1 className="text-3xl font-black uppercase tracking-tight">{pool.name}</h1>
-              {pool.description && (
-                <p className="mt-1 text-sm text-muted-foreground">{pool.description}</p>
-              )}
-            </div>
-            <Button
-              variant="outline"
-              onClick={() => {
-                navigator.clipboard.writeText(pool.invite_code);
-                toast.success("Código copiado!");
-              }}
-              className="font-mono"
-            >
-              <Copy className="mr-2 h-4 w-4" />
-              {pool.invite_code}
-            </Button>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-primary">Bolão</div>
+            <h1 className="text-3xl font-black uppercase tracking-tight">{pool.name}</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              # Participantes: {participantCount}
+            </p>
           </div>
         </div>
 
         <Tabs value={tab} onValueChange={setTab}>
           <TooltipProvider delayDuration={150}>
-            <TabsList className="grid w-full grid-cols-6 h-auto">
+            <TabsList
+              className={`grid w-full h-auto ${showMatchesTab ? "grid-cols-6" : "grid-cols-5"}`}
+            >
               {[
-                {
-                  value: "matches",
-                  label: "Resultado Jogos",
-                  shortLabel: "Tabela da Copa",
-                  icon: Calendar,
-                },
+                ...(showMatchesTab
+                  ? [
+                      {
+                        value: "matches",
+                        label: "Resultado Jogos",
+                        shortLabel: "Tabela da Copa",
+                        icon: Calendar,
+                      },
+                    ]
+                  : []),
                 {
                   value: "predictions",
                   label: "Palpites Fase Grupos",
@@ -144,9 +173,11 @@ function PoolPage() {
               ))}
             </TabsList>
           </TooltipProvider>
-          <TabsContent value="matches" className="mt-6">
-            <MatchesTab poolId={id} />
-          </TabsContent>
+          {showMatchesTab && (
+            <TabsContent value="matches" className="mt-6">
+              <MatchesTab poolId={id} />
+            </TabsContent>
+          )}
           <TabsContent value="predictions" className="mt-6">
             <PredictionsTab onAdvanceToBracket={() => setTab("bracket")} />
           </TabsContent>

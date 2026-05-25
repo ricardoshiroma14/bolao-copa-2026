@@ -53,9 +53,15 @@ The app currently redirects signed-in users to the first pool by creation date.
 ```bash
 supabase functions deploy sync-matches
 supabase functions deploy score-predictions
+supabase functions deploy audit-scoring
+supabase functions deploy thesportsdb-fixture-test
 supabase secrets set SUPABASE_URL=https://your-project-ref.supabase.co
+supabase secrets set SUPABASE_PUBLISHABLE_KEY=your-supabase-publishable-key
 supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-supabase secrets set FOOTBALL_API_KEY=your-football-data-api-key
+supabase secrets set THESPORTSDB_API_KEY=your-thesportsdb-api-key
+supabase secrets set THESPORTSDB_WORLD_CUP_LEAGUE_ID=4429
+supabase secrets set THESPORTSDB_WORLD_CUP_SEASON=2026
+supabase secrets set SYNC_CRON_SECRET=your-sync-cron-secret
 ```
 
-`FOOTBALL_API_KEY` is only needed for `sync-matches`.
+`THESPORTSDB_API_KEY` is optional because `sync-matches` falls back to TheSportsDB's free key `123`. Set `SYNC_CRON_SECRET` only if you call `sync-matches` from a scheduled job.

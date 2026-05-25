@@ -1,10 +1,15 @@
 import { useMemo, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trophy, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { setRoundOf32PointsRelease } from "@/lib/admin-pools.functions";
 import { computeQualifiers, type MatchLite, type TeamLite } from "@/lib/group-standings";
+import { normalizeTeamsForDisplay } from "@/lib/team-names";
+import { isRoundOf32PointsReleased } from "@/lib/round-of-32-release";
 import { THIRD_PLACE_COMBINATION_NUMBERS } from "@/lib/wc2026-thirds-combination-numbers";
 import { THIRD_PLACE_COMBINATIONS } from "@/lib/wc2026-thirds-combinations";
 import { R32 } from "@/lib/wc2026-bracket";
@@ -18,7 +23,18 @@ type R32MatchRow = {
   away_team_id: string | null;
 };
 
+type PoolReleaseRow = {
+  id: string;
+  name: string;
+  round_of_32_points_enabled: boolean;
+  release_storage: "column" | "fallback";
+};
+
 const MATCH_NUM_RE = /m(\d{2,3})\b/i;
+
+function isRoundOf32ReleaseColumnMissing(error: { message?: string } | null): boolean {
+  return error?.message?.includes("round_of_32_points_enabled") ?? false;
+}
 
 function extractR32Num(external_id: string | null): number | null {
   if (!external_id) return null;
@@ -30,6 +46,7 @@ function extractR32Num(external_id: string | null): number | null {
 
 export function AdminQualifiers() {
   const qc = useQueryClient();
+  const saveRoundOf32Release = useServerFn(setRoundOf32PointsRelease);
   const [applying, setApplying] = useState(false);
 
   const { data: teams } = useQuery({
@@ -40,7 +57,7 @@ export function AdminQualifiers() {
         .select("id,name,code,group_name,flag_url")
         .order("name");
       if (error) throw error;
-      return data as TeamRow[];
+      return normalizeTeamsForDisplay((data ?? []) as TeamRow[]);
     },
   });
 
@@ -69,6 +86,35 @@ export function AdminQualifiers() {
         .eq("stage", "round_of_32");
       if (error) throw error;
       return data as R32MatchRow[];
+    },
+  });
+
+  const { data: pools } = useQuery({
+    queryKey: ["admin-pools-r32-release"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("pools")
+        .select("id,name,round_of_32_points_enabled")
+        .order("created_at");
+      if (!error) {
+        return (data ?? []).map((pool) => ({
+          ...pool,
+          round_of_32_points_enabled: isRoundOf32PointsReleased(pool),
+          release_storage: "column",
+        })) as PoolReleaseRow[];
+      }
+      if (!isRoundOf32ReleaseColumnMissing(error)) throw error;
+
+      const { data: fallbackData, error: fallbackError } = await supabase
+        .from("pools")
+        .select("id,name,bonus_round_of_32_wrong")
+        .order("created_at");
+      if (fallbackError) throw fallbackError;
+      return (fallbackData ?? []).map((pool) => ({
+        ...pool,
+        round_of_32_points_enabled: isRoundOf32PointsReleased(pool),
+        release_storage: "fallback",
+      })) as PoolReleaseRow[];
     },
   });
 
@@ -168,7 +214,22 @@ export function AdminQualifiers() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (!teams || !matches || !computed) {
+  const releaseMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      if (!pools?.length) throw new Error("Nenhum bolão carregado");
+      return saveRoundOf32Release({ data: { enabled } });
+    },
+    onSuccess: ({ enabled }) => {
+      toast.success(
+        enabled ? "Pontos da 32ª liberados no ranking." : "Pontos da 32ª bloqueados no ranking.",
+      );
+      qc.invalidateQueries({ queryKey: ["admin-pools-r32-release"] });
+      qc.invalidateQueries({ queryKey: ["ranking"] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  if (!teams || !matches || !computed || !pools) {
     return (
       <div className="rounded-xl border border-border bg-card p-6">
         <p className="text-sm text-muted-foreground">Carregando...</p>
@@ -177,6 +238,11 @@ export function AdminQualifiers() {
   }
 
   const { qualified, totalGroupGames, finished, allFinished, comboNumber, thirdsMap } = computed;
+  const allPoolsReleased =
+    pools.length > 0 && pools.every((pool) => pool.round_of_32_points_enabled);
+  const partiallyReleased =
+    pools.some((pool) => pool.round_of_32_points_enabled) && !allPoolsReleased;
+  const usingFallbackReleaseStorage = pools.some((pool) => pool.release_storage === "fallback");
 
   return (
     <section className="rounded-xl border border-primary/30 bg-primary/5 p-5">
@@ -211,7 +277,7 @@ export function AdminQualifiers() {
       </p>
 
       {allFinished && thirdsMap && (
-        <div className="mb-4">
+        <div className="mb-4 space-y-3">
           <Button
             size="sm"
             onClick={() => applyMutation.mutate()}
@@ -223,6 +289,25 @@ export function AdminQualifiers() {
           <p className="mt-1 text-xs text-muted-foreground">
             Atualiza os jogos M73–M88 com os times corretos (1º/2º/3º) conforme o bracket oficial.
           </p>
+
+          <div className="flex flex-col gap-3 rounded-lg border border-border bg-card/80 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-bold text-foreground">Liberar pontos da 32ª no Ranking</p>
+              <p className="text-xs text-muted-foreground">
+                {usingFallbackReleaseStorage
+                  ? "Modo compatível ativo: o toggle será salvo no campo legado até a migration sincronizar."
+                  : "Enquanto estiver desligado, a coluna 32ª fica zerada e não entra no total."}
+                {partiallyReleased ? " Alguns bolões estão liberados e outros bloqueados." : ""}
+              </p>
+            </div>
+            <Switch
+              className="border border-primary/30 data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted-foreground/50 disabled:opacity-100 [&>span]:bg-white"
+              checked={allPoolsReleased}
+              disabled={releaseMutation.isPending}
+              onCheckedChange={(checked) => releaseMutation.mutate(checked)}
+              aria-label="Liberar pontos da Rodada de 32 no Ranking"
+            />
+          </div>
         </div>
       )}
 

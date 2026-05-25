@@ -40,6 +40,12 @@ export function RulesTab({ pool }: { pool: Pool }) {
             sua direita na página para ser contabilizado.
           </li>
           <li>
+            Após salvar todos os palpites, o participante deve usar a função{" "}
+            <span className="text-foreground font-semibold">Imprimir palpites</span> para gerar uma
+            cópia datada e acompanhar os resultados. Em caso de erro ou divergência no site, essa
+            impressão datada deverá ser apresentada ao organizador do bolão para conferência.
+          </li>
+          <li>
             Caso tenha algum erro no site em algum jogo que prejudique algum participante, esse jogo
             não será contabilizado PARA TODOS os participantes.
           </li>

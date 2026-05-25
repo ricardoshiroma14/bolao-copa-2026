@@ -15,6 +15,7 @@ import {
   type PredLite,
   type TeamLite,
 } from "@/lib/group-standings";
+import { normalizeTeamsForDisplay } from "@/lib/team-names";
 import {
   FINAL,
   QF,
@@ -120,10 +121,34 @@ function formatScore(value: number | null): string {
   return value === null ? "—" : String(value);
 }
 
+function makeConferenceCode(poolId: string, userId: string | undefined, rows: PrintRow[]): string {
+  const payload = [
+    poolId,
+    userId ?? "",
+    ...rows.map((row) =>
+      [
+        row.matchNum ?? "",
+        row.home,
+        row.away,
+        row.homePick ?? "",
+        row.awayPick ?? "",
+        row.winner ?? "",
+      ].join(":"),
+    ),
+  ].join("|");
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < payload.length; i++) {
+    hash ^= payload.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `BP-${(hash >>> 0).toString(36).toUpperCase().padStart(7, "0")}`;
+}
+
 export function BracketTab({ poolId }: { poolId: string }) {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [drafts, setDrafts] = useState<Record<number, DraftPick>>({});
+  const [printGeneratedAt, setPrintGeneratedAt] = useState("");
 
   const { data: teams } = useQuery({
     queryKey: ["teams"],
@@ -133,7 +158,7 @@ export function BracketTab({ poolId }: { poolId: string }) {
         .select("id,name,code,group_name,flag_url")
         .order("name");
       if (error) throw error;
-      return data as TeamWithFlag[];
+      return normalizeTeamsForDisplay((data ?? []) as TeamWithFlag[]);
     },
   });
 
@@ -674,6 +699,12 @@ export function BracketTab({ poolId }: { poolId: string }) {
     thirdPlaceRow,
     ...finalRows,
   ]);
+  const conferenceCode = makeConferenceCode(poolId, user?.id, printableRows);
+
+  function printPredictions() {
+    setPrintGeneratedAt(format(new Date(), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR }));
+    window.requestAnimationFrame(() => window.print());
+  }
 
   return (
     <div className="space-y-6">
@@ -708,6 +739,15 @@ export function BracketTab({ poolId }: { poolId: string }) {
         <h2 className="mb-2 text-sm font-black uppercase tracking-wide text-foreground">
           Palpites (fase de grupos + chaveamento)
         </h2>
+        <div className="mb-3 text-[10px] text-muted-foreground">
+          <div>
+            Impressão gerada em{" "}
+            {printGeneratedAt || format(new Date(), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}
+          </div>
+          <div>
+            Código de conferência: <strong>{conferenceCode}</strong>
+          </div>
+        </div>
         <table className="w-full table-fixed border-collapse border border-border text-[11px]">
           <tbody>
             {printableRows.map((row) => (
@@ -837,9 +877,19 @@ export function BracketTab({ poolId }: { poolId: string }) {
                   ? "Todos os placares e vencedores do chaveamento estão completos, salvos e prontos para conferência."
                   : "Complete e salve todas as fases para validar seus palpites antes de imprimir."}
               </p>
+              {allRowsStatus.saved && (
+                <p className="mt-1 text-xs font-semibold text-foreground">
+                  Código de conferência: {conferenceCode}
+                </p>
+              )}
             </div>
           </div>
-          <Button type="button" variant="outline" onClick={() => window.print()}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={printPredictions}
+            disabled={!allRowsStatus.saved}
+          >
             <Printer className="h-4 w-4" />
             Imprimir palpites
           </Button>

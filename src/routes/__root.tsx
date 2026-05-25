@@ -10,8 +10,8 @@ import {
 
 import appCss from "../styles.css?url";
 
-const appUrl = import.meta.env.VITE_APP_URL || "http://localhost:5173";
-const ogImageUrl = import.meta.env.VITE_APP_OG_IMAGE_URL || `${appUrl}/og-image.jpg`;
+const APP_URL = (import.meta.env.VITE_APP_URL || "http://localhost:5173").replace(/\/$/, "");
+const OG_IMAGE_URL = import.meta.env.VITE_APP_OG_IMAGE_URL || `${APP_URL}/og-image.jpg`;
 
 function NotFoundComponent() {
   return (
@@ -93,11 +93,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         name: "twitter:description",
         content: "Crie seu bolão, dê palpites e dispute o ranking com a galera na Copa do Mundo.",
       },
-      { property: "og:image", content: ogImageUrl },
+      { property: "og:image", content: OG_IMAGE_URL },
       { property: "og:image:width", content: "1200" },
       { property: "og:image:height", content: "630" },
-      { property: "og:url", content: appUrl },
-      { name: "twitter:image", content: ogImageUrl },
+      { property: "og:url", content: APP_URL },
+      { name: "twitter:image", content: OG_IMAGE_URL },
     ],
     links: [
       {
@@ -127,6 +127,8 @@ function RootShell({ children }: { children: React.ReactNode }) {
 }
 
 import { AuthProvider } from "@/lib/auth";
+import { AdminViewProvider } from "@/lib/admin-view-provider";
+import { ProfileCompletionGate } from "@/components/ProfileCompletionGate";
 import { Toaster } from "@/components/ui/sonner";
 
 function RootComponent() {
@@ -135,8 +137,12 @@ function RootComponent() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <Outlet />
-        <Toaster richColors theme="dark" position="top-center" />
+        <AdminViewProvider>
+          <ProfileCompletionGate>
+            <Outlet />
+          </ProfileCompletionGate>
+          <Toaster richColors theme="dark" position="top-center" />
+        </AdminViewProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

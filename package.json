@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.25.5",
+    "@cloudflare/vite-plugin": "1.37.3",
     "@hookform/resolvers": "^5.2.2",
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -72,17 +72,22 @@
     "typescript-eslint": "^8.56.1",
     "vite": "^7.3.1"
   },
+  "license": "Apache-2.0",
   "name": "world-cup-bolao-template",
   "private": false,
   "scripts": {
-    "build": "vite build",
+    "audit:scoring": "node scripts/audit-scoring.mjs",
+    "build": "npm run verify:scoring && npm run verify:security && npm run verify:functions && vite build",
     "build:dev": "vite build --mode development",
     "dev": "vite dev",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:security": "npm run verify:security",
+    "verify:functions": "node scripts/verify-edge-function-imports.mjs",
+    "verify:scoring": "node scripts/verify-scoring-source.mjs && node scripts/verify-scoring-formulas.mjs",
+    "verify:security": "node scripts/verify-security-regressions.mjs"
   },
   "sideEffects": false,
-  "type": "module",
-  "license": "Apache-2.0"
+  "type": "module"
 }

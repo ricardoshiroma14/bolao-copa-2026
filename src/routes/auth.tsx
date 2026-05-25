@@ -21,6 +21,7 @@ function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [phone, setPhone] = useState("");
   const [forgotOpen, setForgotOpen] = useState(false);
 
   const goToPool = async (uid: string) => {
@@ -46,13 +47,18 @@ function AuthPage() {
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedPhone = phone.trim();
+    if (!trimmedPhone) return toast.error("Informe seu telefone");
     setLoading(true);
     const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         emailRedirectTo: window.location.origin,
-        data: { display_name: displayName || email.split("@")[0] },
+        data: {
+          display_name: displayName.trim() || email.split("@")[0],
+          phone: trimmedPhone,
+        },
       },
     });
     setLoading(false);
@@ -78,11 +84,13 @@ function AuthPage() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {
-        redirectTo: `${window.location.origin}/dashboard`,
+        redirectTo: `${window.location.origin}/complete-profile`,
       },
     });
-    setLoading(false);
-    if (error) return toast.error(error.message ?? "Falha ao iniciar login");
+    if (error) {
+      setLoading(false);
+      return toast.error(error.message ?? "Falha ao iniciar login");
+    }
   };
 
   return (
@@ -198,6 +206,18 @@ function AuthPage() {
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="su-phone">Telefone</Label>
+                  <Input
+                    id="su-phone"
+                    type="tel"
+                    required
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    autoComplete="tel"
+                    placeholder="(11) 99999-9999"
                   />
                 </div>
                 <div>

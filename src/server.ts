@@ -1,10 +1,9 @@
 // Polyfill browser-only globals for SSR BEFORE any module that may transitively
 // import the Supabase browser client (which touches localStorage at module init).
-const runtimeGlobal = globalThis as typeof globalThis & { localStorage?: Storage };
-
-if (typeof runtimeGlobal.localStorage === "undefined") {
+function createMemoryStorage(): Storage {
   const store = new Map<string, string>();
-  runtimeGlobal.localStorage = {
+
+  return {
     getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
     setItem: (k: string, v: string) => {
       store.set(k, String(v));
@@ -19,7 +18,14 @@ if (typeof runtimeGlobal.localStorage === "undefined") {
     get length() {
       return store.size;
     },
-  };
+  } satisfies Storage;
+}
+
+if (typeof globalThis.localStorage === "undefined") {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: createMemoryStorage(),
+  });
 }
 
 import "./lib/error-capture";

@@ -12,9 +12,18 @@ import {
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth";
+import { useEffectiveAdmin } from "@/lib/admin-view";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { isBeforeMatchesRelease } from "@/lib/release-windows";
+import {
+  normalizeScoring,
+  isMatchScorable,
+  scoreBracketRowPoints,
+  scorePredictionPoints,
+  type MatchScoring,
+} from "@/lib/scoring";
 import {
   computeQualifiers,
   type MatchLite,
@@ -22,6 +31,7 @@ import {
   type Row as StandingRow,
   type TeamLite,
 } from "@/lib/group-standings";
+import { normalizeTeamForDisplay, normalizeTeamsForDisplay } from "@/lib/team-names";
 import {
   R32,
   R16,
@@ -32,37 +42,9 @@ import {
   type BracketMatch,
   type SlotSpec,
 } from "@/lib/wc2026-bracket";
+import { matchNumberFromRealMatch } from "@/lib/bracket-match-number";
 import { lookupThirdsAssignment } from "@/lib/wc2026-thirds-combinations";
 import { BRACKET_SCHEDULE } from "@/lib/wc2026-bracket-schedule";
-
-const BRACKET_MATCHES_BY_STAGE: Record<string, number[]> = {
-  round_of_32: R32.map((m) => m.match),
-  round_of_16: R16.map((m) => m.match),
-  quarter: QF.map((m) => m.match),
-  semi: SF.map((m) => m.match),
-  third_place: [THIRD_PLACE_MATCH],
-  final: [FINAL.match],
-};
-
-function matchNumberFromRealMatch(match: {
-  external_id: string | null;
-  stage: string;
-  kickoff_at: string;
-}): number | null {
-  const fromExternalId = match.external_id?.match(/\b(?:M|match[-_ ]?)?(\d{2,3})\b/i);
-  if (fromExternalId) {
-    const num = Number(fromExternalId[1]);
-    if (num >= 73 && num <= FINAL.match) return num;
-  }
-  const stageMatches = BRACKET_MATCHES_BY_STAGE[match.stage] ?? [];
-  if (stageMatches.length === 1) return stageMatches[0];
-  const kickoffMs = new Date(match.kickoff_at).getTime();
-  const byKickoff = stageMatches.find((num) => {
-    const scheduled = BRACKET_SCHEDULE[num];
-    return scheduled && Math.abs(new Date(scheduled.kickoffISO).getTime() - kickoffMs) < 60_000;
-  });
-  return byKickoff ?? null;
-}
 
 type ResolvedSlot =
   | { teamId: string; teamName: string; flagUrl?: string | null; placeholder?: undefined }
@@ -74,7 +56,6 @@ type BracketRow = {
   team_id: string | null;
   home_score: number | null;
   away_score: number | null;
-  points: number | null;
 };
 
 type TeamWithFlag = TeamLite & { flag_url: string | null };
@@ -87,21 +68,86 @@ type MatchRow = MatchLite & {
   away_score: number | null;
   home_penalties: number | null;
   away_penalties: number | null;
+  winner_team_id: string | null;
   external_id: string | null;
   home_team: TeamWithFlag | null;
   away_team: TeamWithFlag | null;
 };
 
-type PredictionRow = PredLite & {
-  points: number | null;
-};
+type PredictionRow = PredLite;
 
 type PickRow = {
   teamId: string | null;
   home: number | null;
   away: number | null;
-  points: number;
 };
+
+function effectivePickWinner(
+  pick: PickRow | undefined,
+  aPred: ResolvedSlot,
+  bPred: ResolvedSlot,
+): string | null {
+  if (!pick) return null;
+  if (pick.home != null && pick.away != null && pick.home !== pick.away) {
+    return pick.home > pick.away ? aPred.teamId : bPred.teamId;
+  }
+  return pick.teamId;
+}
+
+function calculatedGroupPoints(
+  prediction: PredictionRow | undefined,
+  match: MatchRow,
+  scoring: MatchScoring,
+) {
+  if (!prediction || !isMatchScorable(match)) return null;
+  return scorePredictionPoints(prediction, match, scoring);
+}
+
+function calculatedKnockoutDisplayPoints({
+  matchNum,
+  a,
+  b,
+  aPred,
+  bPred,
+  pick,
+  match,
+  scoring,
+}: {
+  matchNum: number;
+  a: ResolvedSlot;
+  b: ResolvedSlot;
+  aPred: ResolvedSlot;
+  bPred: ResolvedSlot;
+  pick?: PickRow;
+  match?: MatchRow;
+  scoring: MatchScoring;
+}) {
+  if (matchNum >= 73 && matchNum <= 88 && !scoring.round_of_32_points_enabled) return null;
+  if (!match || !a.teamId || !b.teamId) {
+    return null;
+  }
+
+  const realTeams = new Set([a.teamId, b.teamId]);
+  const sourceHits = new Set(
+    [aPred.teamId, bPred.teamId].filter(
+      (teamId): teamId is string => !!teamId && realTeams.has(teamId),
+    ),
+  ).size;
+  const breakdown = scoreBracketRowPoints({
+    matchNum,
+    pick: {
+      team_id: effectivePickWinner(pick, aPred, bPred),
+      home_score: pick?.home ?? null,
+      away_score: pick?.away ?? null,
+    },
+    real: match,
+    predictedParticipants: [aPred.teamId, bPred.teamId],
+    sourceHits,
+    scoring,
+  });
+
+  return breakdown.total;
+}
 
 export function MatchesTab({ poolId }: { poolId: string }) {
   const { user } = useAuth();
@@ -121,14 +167,13 @@ export function MatchesTab({ poolId }: { poolId: string }) {
     },
   });
 
-  // 11/06/2026 00:00 horário de Brasília (UTC-3) = 03:00 UTC
-  const MATCHES_RELEASE_UTC = Date.UTC(2026, 5, 11, 3, 0, 0);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, []);
-  const matchesLocked = now < MATCHES_RELEASE_UTC && !isAdmin;
+  const effectiveIsAdmin = useEffectiveAdmin(isAdmin);
+  const matchesLocked = isBeforeMatchesRelease(now) && !effectiveIsAdmin;
 
   useEffect(() => {
     let ch = supabase
@@ -165,7 +210,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
         .select("id,name,code,group_name,flag_url")
         .order("name");
       if (error) throw error;
-      return data as TeamWithFlag[];
+      return normalizeTeamsForDisplay((data ?? []) as TeamWithFlag[]);
     },
   });
 
@@ -175,11 +220,15 @@ export function MatchesTab({ poolId }: { poolId: string }) {
       const { data, error } = await supabase
         .from("matches")
         .select(
-          "*, home_team:teams!matches_home_team_id_fkey(*), away_team:teams!matches_away_team_id_fkey(*)",
+          "id,external_id,stage,group_name,home_team_id,away_team_id,kickoff_at,status,venue,home_score,away_score,home_penalties,away_penalties,winner_team_id,home_team:teams!matches_home_team_id_fkey(id,name,code,group_name,flag_url),away_team:teams!matches_away_team_id_fkey(id,name,code,group_name,flag_url)",
         )
         .order("kickoff_at", { ascending: true });
       if (error) throw error;
-      return data as MatchRow[];
+      return ((data ?? []) as MatchRow[]).map((match) => ({
+        ...match,
+        home_team: match.home_team ? normalizeTeamForDisplay(match.home_team) : null,
+        away_team: match.away_team ? normalizeTeamForDisplay(match.away_team) : null,
+      }));
     },
   });
 
@@ -189,7 +238,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("predictions")
-        .select("*")
+        .select("match_id,home_score,away_score")
         .eq("user_id", user!.id);
       if (error) throw error;
       return data as PredictionRow[];
@@ -202,7 +251,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("bracket_predictions")
-        .select("stage,slot,team_id,home_score,away_score,points")
+        .select("stage,slot,team_id,home_score,away_score")
         .eq("pool_id", poolId)
         .eq("user_id", user!.id);
       if (error) throw error;
@@ -224,6 +273,22 @@ export function MatchesTab({ poolId }: { poolId: string }) {
       return data;
     },
   });
+
+  const { data: poolScoring } = useQuery({
+    queryKey: ["pool-scoring", poolId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("pools")
+        .select(
+          "scoring_exact,scoring_diff,scoring_winner,bonus_round_of_32,bonus_round_of_16,bonus_quarter,bonus_semi,bonus_third_place,bonus_final,round_of_32_points_enabled",
+        )
+        .eq("id", poolId)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+  });
+  const scoring = normalizeScoring(poolScoring);
 
   const groupMatchesLite = useMemo<MatchLite[] | null>(() => {
     if (!matches) return null;
@@ -297,23 +362,35 @@ export function MatchesTab({ poolId }: { poolId: string }) {
 
   const picks = useMemo(() => {
     const map = new Map<number, PickRow>();
+    const thirdPlaceRows = new Map<number, BracketRow>();
     (brackets ?? []).forEach((b) => {
+      if (b.stage === "third_place") {
+        thirdPlaceRows.set(b.slot, b);
+        return;
+      }
       let n = 0;
       if (b.stage === "round_of_16") n = 73 + b.slot;
       else if (b.stage === "quarter") n = 89 + b.slot;
       else if (b.stage === "semi") n = 97 + b.slot;
       else if (b.stage === "final") n = b.slot === 2 ? FINAL.match : 101 + b.slot;
-      else if (b.stage === "third_place") n = THIRD_PLACE_MATCH;
       else return;
       map.set(n, {
         teamId: b.team_id,
         home: b.home_score,
         away: b.away_score,
-        points: b.points ?? 0,
       });
     });
+    const thirdPlaceSlot0 = thirdPlaceRows.get(0);
+    const thirdPlaceSlot1 = thirdPlaceRows.get(1);
+    if (thirdPlaceSlot0 || thirdPlaceSlot1) {
+      map.set(THIRD_PLACE_MATCH, {
+        teamId: thirdPlaceSlot0?.team_id ?? null,
+        home: thirdPlaceSlot0?.home_score ?? thirdPlaceSlot1?.home_score ?? null,
+        away: thirdPlaceSlot0?.away_score ?? thirdPlaceSlot1?.away_score ?? null,
+      });
+    }
     if (champ?.team_id) {
-      const existing = map.get(FINAL.match) ?? { teamId: null, home: null, away: null, points: 0 };
+      const existing = map.get(FINAL.match) ?? { teamId: null, home: null, away: null };
       map.set(FINAL.match, { ...existing, teamId: champ.team_id });
     }
     return map;
@@ -466,6 +543,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
         byGroup={byGroup}
         groupKeys={groupKeys}
         predictions={predictions}
+        scoring={scoring}
         standings={realQualifiers?.byGroup ?? {}}
         teamsById={teamsById}
       />
@@ -511,6 +589,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
                   bPred={bPred}
                   pick={p}
                   match={real}
+                  scoring={scoring}
                 />
               );
             })}
@@ -549,6 +628,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
                 bPred={thirdB_pred}
                 pick={tp}
                 match={real}
+                scoring={scoring}
               />
             );
           })()}
@@ -586,6 +666,7 @@ export function MatchesTab({ poolId }: { poolId: string }) {
                 bPred={resolvePred(FINAL.b)}
                 pick={finalPick}
                 match={real}
+                scoring={scoring}
               />
             );
           })()}
@@ -600,6 +681,7 @@ function GroupStageView({
   byGroup,
   groupKeys,
   predictions,
+  scoring,
   standings,
   teamsById,
 }: {
@@ -607,6 +689,7 @@ function GroupStageView({
   byGroup: Record<string, MatchRow[]>;
   groupKeys: string[];
   predictions: PredictionRow[] | undefined;
+  scoring: MatchScoring;
   standings: Record<string, StandingRow[]>;
   teamsById: Map<string, TeamWithFlag>;
 }) {
@@ -648,6 +731,7 @@ function GroupStageView({
                     key={m.id}
                     match={m}
                     prediction={predictions?.find((p) => p.match_id === m.id)}
+                    scoring={scoring}
                   />
                 ))}
               </div>
@@ -665,6 +749,7 @@ function GroupStageView({
                       key={m.id}
                       match={m}
                       prediction={predictions?.find((p) => p.match_id === m.id)}
+                      scoring={scoring}
                     />
                   ))}
                 </div>
@@ -747,13 +832,22 @@ function StandingsMini({
   );
 }
 
-function GroupMatchCard({ match, prediction }: { match: MatchRow; prediction?: PredictionRow }) {
+function GroupMatchCard({
+  match,
+  prediction,
+  scoring,
+}: {
+  match: MatchRow;
+  prediction?: PredictionRow;
+  scoring: MatchScoring;
+}) {
   const started = new Date(match.kickoff_at) <= new Date();
   const finished = match.status === "finished";
   const live = match.status === "live";
   const hasOfficialScore = match.home_score !== null && match.away_score !== null;
   const showOfficialScore = finished || live || started || hasOfficialScore;
-  const showPredictionPoints = prediction && (finished || live || started || hasOfficialScore);
+  const showPredictionPoints = prediction && isMatchScorable(match);
+  const predictionPoints = calculatedGroupPoints(prediction, match, scoring);
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -836,7 +930,7 @@ function GroupMatchCard({ match, prediction }: { match: MatchRow; prediction?: P
             {showPredictionPoints && (
               <>
                 {" "}
-                · <span className="text-primary font-bold">{prediction.points ?? 0} pts</span>
+                · <span className="text-primary font-bold">{predictionPoints ?? 0} pts</span>
               </>
             )}
           </>
@@ -856,6 +950,7 @@ function KnockoutRow({
   bPred,
   pick,
   match,
+  scoring,
 }: {
   matchNum: number;
   a: ResolvedSlot;
@@ -864,11 +959,12 @@ function KnockoutRow({
   bPred: ResolvedSlot;
   pick?: PickRow;
   match?: MatchRow;
+  scoring: MatchScoring;
 }) {
   const hasPick = pick && (pick.home !== null || pick.away !== null || pick.teamId);
-  const winnerId = pick?.teamId ?? null;
   const palpiteAName = aPred.teamId ? aPred.teamName : (aPred.placeholder ?? "?");
   const palpiteBName = bPred.teamId ? bPred.teamName : (bPred.placeholder ?? "?");
+  const winnerId = effectivePickWinner(pick, aPred, bPred);
   const palpiteHome = pick?.home ?? 0;
   const palpiteAway = pick?.away ?? 0;
   const schedule = BRACKET_SCHEDULE[matchNum];
@@ -883,6 +979,16 @@ function KnockoutRow({
     match?.away_score !== null &&
     match?.away_score !== undefined;
   const showOfficialScore = finished || live || started || hasOfficialScore;
+  const displayPoints = calculatedKnockoutDisplayPoints({
+    matchNum,
+    a,
+    b,
+    aPred,
+    bPred,
+    pick,
+    match,
+    scoring,
+  });
 
   return (
     <div className="px-4 py-4">
@@ -984,8 +1090,8 @@ function KnockoutRow({
                 {palpiteBName}
               </strong>
             </span>
-            {(pick!.points ?? 0) > 0 && (
-              <span className="text-primary font-bold">· {pick!.points} pts</span>
+            {displayPoints != null && displayPoints > 0 && (
+              <span className="text-primary font-bold">· {displayPoints} pts</span>
             )}
           </span>
         ) : (

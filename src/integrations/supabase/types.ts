@@ -256,6 +256,7 @@ export type Database = {
           invite_code: string;
           name: string;
           owner_id: string;
+          round_of_32_points_enabled: boolean;
           scoring_diff: number;
           scoring_exact: number;
           scoring_winner: number;
@@ -280,6 +281,7 @@ export type Database = {
           invite_code?: string;
           name: string;
           owner_id: string;
+          round_of_32_points_enabled?: boolean;
           scoring_diff?: number;
           scoring_exact?: number;
           scoring_winner?: number;
@@ -304,6 +306,7 @@ export type Database = {
           invite_code?: string;
           name?: string;
           owner_id?: string;
+          round_of_32_points_enabled?: boolean;
           scoring_diff?: number;
           scoring_exact?: number;
           scoring_winner?: number;
@@ -441,6 +444,10 @@ export type Database = {
       is_pool_member: {
         Args: { _pool_id: string; _user_id: string };
         Returns: boolean;
+      };
+      join_pool_by_invite_code: {
+        Args: { _invite_code: string };
+        Returns: string;
       };
     };
     Enums: {

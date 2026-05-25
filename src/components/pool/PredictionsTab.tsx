@@ -23,6 +23,7 @@ import {
   type PredLite,
   type TeamLite,
 } from "@/lib/group-standings";
+import { normalizeTeamsForDisplay } from "@/lib/team-names";
 import { THIRD_PLACE_COMBINATION_NUMBERS } from "@/lib/wc2026-thirds-combination-numbers";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
@@ -47,7 +48,7 @@ export function PredictionsTab({ onAdvanceToBracket }: PredictionsTabProps) {
         .select("id,name,code,group_name,flag_url")
         .order("name");
       if (error) throw error;
-      return data as TeamWithFlag[];
+      return normalizeTeamsForDisplay((data ?? []) as TeamWithFlag[]);
     },
   });
 

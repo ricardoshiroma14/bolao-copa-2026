@@ -18,6 +18,7 @@ import {
 import { BRACKET_SCHEDULE } from "@/lib/wc2026-bracket-schedule";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { normalizeTeamForDisplay } from "@/lib/team-names";
 
 type MatchRow = {
   id: string;
@@ -34,8 +35,8 @@ type MatchRow = {
   winner_team_id: string | null;
   home_team_id: string | null;
   away_team_id: string | null;
-  home_team: { name: string; flag_url: string | null } | null;
-  away_team: { name: string; flag_url: string | null } | null;
+  home_team: { name: string; code: string | null; flag_url: string | null } | null;
+  away_team: { name: string; code: string | null; flag_url: string | null } | null;
 };
 
 type MatchRowWithNumber = MatchRow & { matchNum: number | null };
@@ -246,12 +247,16 @@ export function AdminMatches() {
         .select(
           "id,external_id,stage,group_name,kickoff_at,venue,status,home_score,away_score," +
             "home_penalties,away_penalties,winner_team_id,home_team_id,away_team_id," +
-            "home_team:teams!matches_home_team_id_fkey(name,flag_url)," +
-            "away_team:teams!matches_away_team_id_fkey(name,flag_url)",
+            "home_team:teams!matches_home_team_id_fkey(name,code,flag_url)," +
+            "away_team:teams!matches_away_team_id_fkey(name,code,flag_url)",
         )
         .order("kickoff_at", { ascending: true });
       if (error) throw error;
-      return data as unknown as MatchRow[];
+      return (data as unknown as MatchRow[]).map((match) => ({
+        ...match,
+        home_team: match.home_team ? normalizeTeamForDisplay(match.home_team) : null,
+        away_team: match.away_team ? normalizeTeamForDisplay(match.away_team) : null,
+      }));
     },
   });
 

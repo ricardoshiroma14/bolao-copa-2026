@@ -16,14 +16,16 @@ import {
   type BracketMatch,
   type SlotSpec,
 } from "@/lib/wc2026-bracket";
+import { matchNumberFromRealMatch } from "@/lib/bracket-match-number";
 import {
   computeQualifiers,
   type MatchLite,
   type PredLite,
   type TeamLite,
 } from "@/lib/group-standings";
+import { isMatchScorable, scoreMatchPoints } from "@/lib/scoring";
+import { normalizeTeamsForDisplay } from "@/lib/team-names";
 import { lookupThirdsAssignment } from "@/lib/wc2026-thirds-combinations";
-import { BRACKET_SCHEDULE } from "@/lib/wc2026-bracket-schedule";
 
 type Props = {
   poolId: string;
@@ -55,14 +57,13 @@ type Match = {
   winner_team_id: string | null;
   status: string;
 };
-type Pred = { match_id: string; home_score: number; away_score: number; points: number };
+type Pred = { match_id: string; home_score: number; away_score: number };
 type Bracket = {
   stage: string;
   slot: number;
   team_id: string | null;
   home_score: number | null;
   away_score: number | null;
-  points: number;
 };
 
 const STAGE_MATCH_BASE: Record<string, number> = {
@@ -70,15 +71,6 @@ const STAGE_MATCH_BASE: Record<string, number> = {
   quarter: 89,
   semi: 97,
   final: 101,
-};
-
-const BRACKET_MATCHES_BY_STAGE: Record<string, number[]> = {
-  round_of_32: R32.map((m) => m.match),
-  round_of_16: R16.map((m) => m.match),
-  quarter: QF.map((m) => m.match),
-  semi: SF.map((m) => m.match),
-  third_place: [THIRD_PLACE_MATCH],
-  final: [FINAL.match],
 };
 
 type ResolvedSlot =
@@ -100,26 +92,26 @@ export function ParticipantDetailsDialog({ poolId, userId, name, open, onOpenCha
           .order("kickoff_at"),
         supabase
           .from("predictions")
-          .select("match_id,home_score,away_score,points")
+          .select("match_id,home_score,away_score")
           .eq("user_id", userId!),
         supabase
           .from("bracket_predictions")
-          .select("stage,slot,team_id,home_score,away_score,points")
+          .select("stage,slot,team_id,home_score,away_score")
           .eq("pool_id", poolId)
           .eq("user_id", userId!),
         supabase
           .from("champion_predictions")
-          .select("team_id,points")
+          .select("team_id")
           .eq("pool_id", poolId)
           .eq("user_id", userId!)
           .maybeSingle(),
       ]);
       return {
-        teams: (teamsRes.data ?? []) as Team[],
+        teams: normalizeTeamsForDisplay((teamsRes.data ?? []) as Team[]),
         matches: (matchesRes.data ?? []) as Match[],
         preds: (predsRes.data ?? []) as Pred[],
         brackets: (bracketRes.data ?? []) as Bracket[],
-        champion: champRes.data as { team_id: string; points: number } | null,
+        champion: champRes.data as { team_id: string } | null,
       };
     },
   });
@@ -319,18 +311,18 @@ export function ParticipantDetailsDialog({ poolId, userId, name, open, onOpenCha
   // Returns null when not eligible (match not finished or user didn't predict a placar).
   function scoreOnlyPoints(
     pick: { home_score: number | null; away_score: number | null } | null | undefined,
-    realMatch: { home_score: number | null; away_score: number | null } | undefined,
+    realMatch:
+      | { home_score: number | null; away_score: number | null; status: string | null }
+      | undefined,
   ): number | null {
     if (!pick || pick.home_score == null || pick.away_score == null) return null;
-    if (!realMatch || realMatch.home_score == null || realMatch.away_score == null) return null;
-    const ph = pick.home_score,
-      pa = pick.away_score,
-      rh = realMatch.home_score,
-      ra = realMatch.away_score;
-    if (ph === rh && pa === ra) return 10;
-    if (Math.sign(ph - pa) !== Math.sign(rh - ra)) return 0;
-    if (ph === rh || pa === ra) return 7;
-    return 5;
+    if (!isMatchScorable(realMatch)) return null;
+    return scoreMatchPoints(
+      pick.home_score,
+      pick.away_score,
+      realMatch.home_score,
+      realMatch.away_score,
+    );
   }
 
   function MatchupCell({
@@ -416,9 +408,11 @@ export function ParticipantDetailsDialog({ poolId, userId, name, open, onOpenCha
         ? { home_score: pick.away_score, away_score: pick.home_score }
         : pick;
     const scorePts = teamsMatch ? scoreOnlyPoints(pickForScore ?? null, realMatch) : null;
+    const matchNumberClass = teamsMatch ? "text-primary" : "text-muted-foreground";
+
     return (
       <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_minmax(0,1fr)_2.5rem] items-center gap-2 px-3 py-2 text-xs">
-        <span className="text-[10px] font-bold text-muted-foreground">M{matchNum}</span>
+        <span className={`text-[10px] font-bold ${matchNumberClass}`}>M{matchNum}</span>
         <MatchupCell
           aSlot={aSlot}
           bSlot={bSlot}
@@ -485,10 +479,8 @@ export function ParticipantDetailsDialog({ poolId, userId, name, open, onOpenCha
                         const h = teamsById.get(m.home_team_id ?? "");
                         const a = teamsById.get(m.away_team_id ?? "");
                         const p = predsByMatch.get(m.id);
-                        const hasReal =
-                          m.home_score != null &&
-                          m.away_score != null &&
-                          ["finished", "live"].includes(m.status);
+                        const hasReal = isMatchScorable(m);
+                        const points = scoreOnlyPoints(p ?? null, m);
                         return (
                           <div
                             key={m.id}
@@ -525,14 +517,7 @@ export function ParticipantDetailsDialog({ poolId, userId, name, open, onOpenCha
                               <span className="truncate font-medium">{a?.name ?? "—"}</span>
                             </div>
                             <span className="text-right text-[11px] font-bold tabular-nums text-primary w-10">
-                              {scoreOnlyPoints(
-                                p ?? null,
-                                hasReal
-                                  ? { home_score: m.home_score, away_score: m.away_score }
-                                  : undefined,
-                              ) == null
-                                ? "-"
-                                : `+${scoreOnlyPoints(p ?? null, { home_score: m.home_score, away_score: m.away_score })}`}
+                              {points == null ? "-" : `+${points}`}
                             </span>
                           </div>
                         );
@@ -581,16 +566,21 @@ export function ParticipantDetailsDialog({ poolId, userId, name, open, onOpenCha
                   const bId = thirdPlaceAwayPick?.team_id ?? null;
                   const realHome = realM103?.home_team_id ?? null;
                   const realAway = realM103?.away_team_id ?? null;
+                  const sameOrientation = aId === realHome && bId === realAway;
+                  const flippedOrientation = aId === realAway && bId === realHome;
                   const teamsMatch =
                     !!realHome &&
                     !!realAway &&
                     !!aId &&
                     !!bId &&
-                    ((aId === realHome && bId === realAway) ||
-                      (aId === realAway && bId === realHome));
+                    (sameOrientation || flippedOrientation);
                   const scoreFor = (p: Bracket | null | undefined) => {
                     if (!teamsMatch || !p || !winnerId || p.team_id !== winnerId) return null;
-                    return scoreOnlyPoints(p, realM103);
+                    const pickForScore =
+                      flippedOrientation && p.home_score != null && p.away_score != null
+                        ? { home_score: p.away_score, away_score: p.home_score }
+                        : p;
+                    return scoreOnlyPoints(pickForScore, realM103);
                   };
                   const sHome = scoreFor(thirdPlaceHomePick);
                   const sAway = scoreFor(thirdPlaceAwayPick);
@@ -732,23 +722,4 @@ function formatRealScore(match?: Match): string | null {
     return `${regular} pen. ${match!.home_penalties}×${match!.away_penalties}`;
   }
   return regular;
-}
-
-function matchNumberFromRealMatch(match: Match): number | null {
-  const fromExternalId = match.external_id?.match(/\b(?:M|match[-_ ]?)?(\d{2,3})\b/i);
-  if (fromExternalId) {
-    const num = Number(fromExternalId[1]);
-    if (num >= 73 && num <= FINAL.match) return num;
-  }
-
-  const stageMatches = BRACKET_MATCHES_BY_STAGE[match.stage] ?? [];
-  if (stageMatches.length === 1) return stageMatches[0];
-
-  const kickoffMs = new Date(match.kickoff_at).getTime();
-  const byKickoff = stageMatches.find((num) => {
-    const scheduled = BRACKET_SCHEDULE[num];
-    return scheduled && Math.abs(new Date(scheduled.kickoffISO).getTime() - kickoffMs) < 60_000;
-  });
-
-  return byKickoff ?? null;
 }

@@ -14,7 +14,7 @@ function createSupabaseAdminClient() {
       ...(!SUPABASE_URL ? ["SUPABASE_URL"] : []),
       ...(!SUPABASE_SERVICE_ROLE_KEY ? ["SUPABASE_SERVICE_ROLE_KEY"] : []),
     ];
-    const message = `Missing Supabase environment variable(s): ${missing.join(", ")}. Configure them in your deployment environment.`;
+    const message = `Missing Supabase environment variable(s): ${missing.join(", ")}. Configure the server environment before using admin operations.`;
     console.error(`[Supabase] ${message}`);
     throw new Error(message);
   }

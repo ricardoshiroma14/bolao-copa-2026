@@ -90,10 +90,7 @@
     color: var(--color-foreground);
     font-feature-settings: "ss01", "cv11";
   }
-  h1,
-  h2,
-  h3,
-  h4 {
+  h1, h2, h3, h4 {
     font-family: ui-sans-serif, system-ui, sans-serif;
     letter-spacing: -0.02em;
     font-weight: 700;
@@ -106,10 +103,7 @@
     radial-gradient(ellipse at top, oklch(0.3 0.08 35 / 0.25), transparent 60%),
     linear-gradient(oklch(0.3 0.025 240 / 0.4) 1px, transparent 1px),
     linear-gradient(90deg, oklch(0.3 0.025 240 / 0.4) 1px, transparent 1px);
-  background-size:
-    auto,
-    32px 32px,
-    32px 32px;
+  background-size: auto, 32px 32px, 32px 32px;
 }
 
 /* Remove spinner arrows from number inputs (better UX for score entry) */

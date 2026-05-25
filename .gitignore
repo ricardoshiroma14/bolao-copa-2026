@@ -15,6 +15,9 @@ dist-ssr
 .tanstack/**
 .nitro
 *.local
+.env
+.env.*
+!.env.example
 
 # Wrangler / Cloudflare
 .wrangler/
@@ -30,9 +33,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Environment and local Supabase state
-.env
-.env.*
-!.env.example
-supabase/.temp/

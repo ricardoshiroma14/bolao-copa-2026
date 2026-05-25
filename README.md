@@ -15,7 +15,7 @@ Este template público não depende do Lovable. Ele usa Vite, TanStack Start, Re
 - Ranking com regras de pontuação configuráveis
 - Telas administrativas para jogos, classificadas, pagamentos, pontuação e sincronização
 - Políticas RLS, migrations e Edge Functions do Supabase
-- Sincronização opcional de jogos via football-data.org
+- Sincronização opcional de jogos via TheSportsDB
 
 ### Stack
 
@@ -44,8 +44,10 @@ Use `.env.example` como referência. Grupos principais:
 
 - `VITE_SUPABASE_*`: URL e chave publicável do Supabase, seguras para o navegador
 - `SUPABASE_*`: variáveis de servidor/funções, incluindo a service role key
-- `FOOTBALL_API_KEY`: opcional, usada apenas para sincronizar jogos
+- `THESPORTSDB_*`: opcional, usada apenas para sincronizar jogos pela TheSportsDB
 - `VITE_PAYMENT_*`: textos públicos opcionais para a aba de pagamento
+- `VITE_WHATSAPP_GROUP_URL`: link público opcional exibido no perfil
+- `VITE_PROTECTED_OWNER_EMAILS` e `PROTECTED_OWNER_EMAILS`: emails que não podem ser excluídos pela tela admin
 - `VITE_APP_URL` e `VITE_APP_OG_IMAGE_URL`: URLs públicas para metadados
 
 Nunca faça commit do arquivo `.env`.
@@ -117,7 +119,7 @@ This public template is intentionally independent from Lovable. It uses Vite, Ta
 - Ranking with configurable scoring rules
 - Admin screens for matches, qualifiers, payments, scoring, and sync
 - Supabase RLS policies, migrations, and Edge Functions
-- Optional football-data.org match sync
+- Optional TheSportsDB match sync
 
 ### Tech Stack
 
@@ -146,8 +148,10 @@ Use `.env.example` as the source of truth. Main groups:
 
 - `VITE_SUPABASE_*`: browser-safe Supabase URL and publishable key
 - `SUPABASE_*`: server/function variables, including the service role key
-- `FOOTBALL_API_KEY`: optional, only used for match sync
+- `THESPORTSDB_*`: optional, only used for TheSportsDB match sync
 - `VITE_PAYMENT_*`: optional public copy for the payment tab
+- `VITE_WHATSAPP_GROUP_URL`: optional public link shown on the profile page
+- `VITE_PROTECTED_OWNER_EMAILS` and `PROTECTED_OWNER_EMAILS`: emails protected from admin deletion
 - `VITE_APP_URL` and `VITE_APP_OG_IMAGE_URL`: public metadata URLs
 
 Never commit `.env`.

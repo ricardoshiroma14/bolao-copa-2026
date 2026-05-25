@@ -1,16 +1,30 @@
 // Recalculate prediction points for all finished matches and bracket/champion picks
 // using the official pool scoring rules.
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { lookupThirdsAssignment } from "../../../src/lib/wc2026-thirds-combinations.ts";
+import {
+  BRACKET_SOURCE_MATCHES,
+  bracketMatchNum,
+  isCanonicalBracketStageSlot,
+  normalizeScoring,
+  pickStorageFor,
+  scoreBracketRowPoints,
+  scorePredictionPoints,
+  type MatchScoringInput,
+} from "../../../src/lib/scoring.ts";
+import {
+  computeQualifiers,
+  type MatchLite,
+  type PredLite,
+  type TeamLite,
+} from "../../../src/lib/group-standings.ts";
+import { R32, type SlotSpec } from "../../../src/lib/wc2026-bracket.ts";
+import { matchNumberFromRealMatch } from "../../../src/lib/bracket-match-number.ts";
+import { AdminAuthError, requireAdmin } from "../_shared/admin-auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
-
-type MatchScoringCfg = {
-  scoring_exact: number;
-  scoring_diff: number;
-  scoring_winner: number;
 };
 
 type MatchRow = {
@@ -30,248 +44,75 @@ type MatchScoreRow = {
 type ScoreFunctionResult = {
   predictions: number;
   brackets: number;
+  champions: number;
 };
 
-type TeamLite = { id: string; name: string; code: string; group_name: string | null };
-type MatchLite = {
+type PoolRow = MatchScoringInput & {
   id: string;
+};
+
+type BracketPredictionRow = {
+  id: string;
+  user_id: string;
   stage: string;
-  group_name: string | null;
-  home_team_id: string | null;
-  away_team_id: string | null;
-};
-type PredLite = { match_id: string; home_score: number; away_score: number };
-
-type StandRow = {
-  team: TeamLite;
-  played: number;
-  wins: number;
-  draws: number;
-  losses: number;
-  gf: number;
-  ga: number;
-  gd: number;
-  points: number;
+  slot: number;
+  team_id: string | null;
+  home_score: number | null;
+  away_score: number | null;
 };
 
-function emptyRow(team: TeamLite): StandRow {
-  return { team, played: 0, wins: 0, draws: 0, losses: 0, gf: 0, ga: 0, gd: 0, points: 0 };
-}
-
-function buildStandings(teams: TeamLite[], matches: MatchLite[], preds: PredLite[]): StandRow[] {
-  const byId = new Map<string, StandRow>();
-  teams.forEach((t) => byId.set(t.id, emptyRow(t)));
-  const predBy = new Map(preds.map((p) => [p.match_id, p]));
-  for (const m of matches) {
-    if (!m.home_team_id || !m.away_team_id) continue;
-    const p = predBy.get(m.id);
-    if (!p) continue;
-    const h = byId.get(m.home_team_id);
-    const a = byId.get(m.away_team_id);
-    if (!h || !a) continue;
-    h.played++;
-    a.played++;
-    h.gf += p.home_score;
-    h.ga += p.away_score;
-    a.gf += p.away_score;
-    a.ga += p.home_score;
-    if (p.home_score > p.away_score) {
-      h.wins++;
-      h.points += 3;
-      a.losses++;
-    } else if (p.home_score < p.away_score) {
-      a.wins++;
-      a.points += 3;
-      h.losses++;
-    } else {
-      h.draws++;
-      a.draws++;
-      h.points++;
-      a.points++;
-    }
-  }
-  byId.forEach((r) => {
-    r.gd = r.gf - r.ga;
-  });
-  return Array.from(byId.values());
-}
-
-function cmpOverall(a: StandRow, b: StandRow): number {
-  if (b.points !== a.points) return b.points - a.points;
-  if (b.gd !== a.gd) return b.gd - a.gd;
-  if (b.gf !== a.gf) return b.gf - a.gf;
-  return a.team.name.localeCompare(b.team.name);
-}
-
-function sortGroup(rows: StandRow[], groupMatches: MatchLite[], preds: PredLite[]): StandRow[] {
-  const sorted = [...rows].sort((a, b) => b.points - a.points);
-  const result: StandRow[] = [];
-  let i = 0;
-  while (i < sorted.length) {
-    let j = i + 1;
-    while (j < sorted.length && sorted[j].points === sorted[i].points) j++;
-    const cluster = sorted.slice(i, j);
-    if (cluster.length === 1) result.push(cluster[0]);
-    else {
-      const ids = new Set(cluster.map((r) => r.team.id));
-      const subMatches = groupMatches.filter(
-        (m) =>
-          m.home_team_id && m.away_team_id && ids.has(m.home_team_id) && ids.has(m.away_team_id),
-      );
-      const mini = buildStandings(
-        cluster.map((r) => r.team),
-        subMatches,
-        preds,
-      );
-      const miniById = new Map(mini.map((m) => [m.team.id, m]));
-      result.push(
-        ...[...cluster].sort((a, b) => {
-          const ma = miniById.get(a.team.id)!;
-          const mb = miniById.get(b.team.id)!;
-          if (mb.points !== ma.points) return mb.points - ma.points;
-          if (mb.gd !== ma.gd) return mb.gd - ma.gd;
-          if (mb.gf !== ma.gf) return mb.gf - ma.gf;
-          return cmpOverall(a, b);
-        }),
-      );
-    }
-    i = j;
-  }
-  return result;
-}
-
-function computeQualifiedIds(
-  teams: TeamLite[],
-  matches: MatchLite[],
-  preds: PredLite[],
-): Set<string> {
-  const groupNames = Array.from(
-    new Set(teams.map((t) => t.group_name).filter((g): g is string => !!g)),
-  ).sort();
-  const ids = new Set<string>();
-  const thirdsRaw: StandRow[] = [];
-  for (const g of groupNames) {
-    const groupTeams = teams.filter((t) => t.group_name === g);
-    const groupMatches = matches.filter((m) => m.stage === "group" && m.group_name === g);
-    const rows = sortGroup(buildStandings(groupTeams, groupMatches, preds), groupMatches, preds);
-    if (rows[0]) ids.add(rows[0].team.id);
-    if (rows[1]) ids.add(rows[1].team.id);
-    if (rows[2]) thirdsRaw.push(rows[2]);
-  }
-  thirdsRaw
-    .sort(cmpOverall)
-    .slice(0, 8)
-    .forEach((r) => ids.add(r.team.id));
-  return ids;
-}
-
-/**
- * Match scoring (per official rules):
- *  - Exact score                        → 10
- *  - Right winner AND one of the scores → 7
- *  - Only winner / draw (non-exact)     → 5
- *  - Otherwise                          → 0
- */
-function scoreMatch(
-  predH: number,
-  predA: number,
-  realH: number,
-  realA: number,
-  cfg: MatchScoringCfg,
-): number {
-  if (predH === realH && predA === realA) return cfg.scoring_exact;
-  const predWinner = Math.sign(predH - predA);
-  const realWinner = Math.sign(realH - realA);
-  if (predWinner !== realWinner) return 0;
-  if (predH === realH || predA === realA) return cfg.scoring_diff;
-  return cfg.scoring_winner;
-}
-
-// Bracket source map — which two match numbers feed into target match number.
-// For 73-88 (R32) sources are group qualifiers (handled separately).
-// For 103 (3rd place) sources are losers of 101 / 102 (special).
-const SOURCE_MATCHES: Record<number, [number, number]> = {
-  89: [74, 77],
-  90: [73, 75],
-  91: [76, 78],
-  92: [79, 80],
-  93: [83, 84],
-  94: [81, 82],
-  95: [86, 88],
-  96: [85, 87],
-  97: [89, 90],
-  98: [93, 94],
-  99: [91, 92],
-  100: [95, 96],
-  101: [97, 98],
-  102: [99, 100],
-  104: [101, 102],
+type ChampionPredictionRow = {
+  id: string;
+  team_id: string | null;
 };
 
-function bracketMatchNum(stage: string, slot: number): number | null {
-  if (stage === "round_of_16") return 73 + slot;
-  if (stage === "quarter") return 89 + slot;
-  if (stage === "semi") return 97 + slot;
-  if (stage === "final") {
-    if (slot === 0) return 101;
-    if (slot === 1) return 102;
-    if (slot === 2) return 104;
-  }
-  if (stage === "third_place" && (slot === 0 || slot === 1)) return 103;
-  return null;
-}
+type QualifierResult = ReturnType<typeof computeQualifiers>;
 
-// Which storage stage/slot corresponds to "user's pick for the winner of matchN"?
-function pickStorageFor(matchNum: number): { stage: string; slot: number } | null {
-  if (matchNum >= 73 && matchNum <= 88) return { stage: "round_of_16", slot: matchNum - 73 };
-  if (matchNum >= 89 && matchNum <= 96) return { stage: "quarter", slot: matchNum - 89 };
-  if (matchNum >= 97 && matchNum <= 100) return { stage: "semi", slot: matchNum - 97 };
-  if (matchNum === 101) return { stage: "final", slot: 0 };
-  if (matchNum === 102) return { stage: "final", slot: 1 };
-  if (matchNum === 104) return { stage: "final", slot: 2 };
-  return null;
+function resolveR32Slot(
+  spec: SlotSpec,
+  qualifiers: QualifierResult,
+  matchNum: number,
+): string | null {
+  if (spec.kind === "winner") return qualifiers.byGroup[spec.group]?.[0]?.team.id ?? null;
+  if (spec.kind === "runnerUp") return qualifiers.byGroup[spec.group]?.[1]?.team.id ?? null;
+
+  const thirdGroups = qualifiers.qualified.filter((q) => q.position === 3).map((q) => q.group);
+  const assignment = lookupThirdsAssignment(thirdGroups);
+  const group = assignment?.[matchNum];
+  return group ? (qualifiers.byGroup[group]?.[2]?.team.id ?? null) : null;
 }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
+    await requireAdmin(req);
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    const { data: pools } = await supabase.from("pools").select("*");
-    if (!pools?.length) return ok({ predictions: 0, brackets: 0 });
-
-    const defaultCfg: MatchScoringCfg = {
-      scoring_exact: 10,
-      scoring_diff: 7,
-      scoring_winner: 5,
-    };
+    const { data: pools } = await supabase
+      .from("pools")
+      .select(
+        "id, scoring_exact, scoring_diff, scoring_winner, bonus_round_of_32, bonus_round_of_32_wrong, bonus_round_of_16, bonus_quarter, bonus_semi, bonus_third_place, bonus_final, bonus_champion, round_of_32_points_enabled",
+      );
+    if (!pools?.length) return ok({ predictions: 0, brackets: 0, champions: 0 });
 
     // ----- Match (group + knockout) prediction scoring -----
-    const { data: finishedMatches } = await supabase
+    const { data: predictionMatches } = await supabase
       .from("matches")
-      .select("id, home_score, away_score, stage, status")
-      .not("home_score", "is", null)
-      .not("away_score", "is", null);
+      .select("id, home_score, away_score, stage, status");
 
     let predUpdates = 0;
-    for (const m of (finishedMatches ?? []) as MatchRow[]) {
-      if (m.home_score == null || m.away_score == null) continue;
+    for (const m of (predictionMatches ?? []) as MatchRow[]) {
       const { data: preds } = await supabase
         .from("predictions")
         .select("id, home_score, away_score")
         .eq("match_id", m.id);
       for (const p of (preds ?? []) as MatchScoreRow[]) {
-        const pts = scoreMatch(
-          p.home_score!,
-          p.away_score!,
-          m.home_score,
-          m.away_score,
-          defaultCfg,
-        );
+        const pts = scorePredictionPoints(p, m);
         await supabase.from("predictions").update({ points: pts }).eq("id", p.id);
         predUpdates++;
       }
@@ -286,37 +127,29 @@ Deno.serve(async (req) => {
     const { data: allMatchesData } = await supabase
       .from("matches")
       .select(
-        "id, external_id, stage, group_name, home_team_id, away_team_id, home_score, away_score, winner_team_id",
+        "id, external_id, stage, group_name, kickoff_at, home_team_id, away_team_id, home_score, away_score, winner_team_id, status",
       );
     type RealMatch = {
       id: string;
       external_id: string | null;
       stage: string;
       group_name: string | null;
+      kickoff_at: string;
       home_team_id: string | null;
       away_team_id: string | null;
       home_score: number | null;
       away_score: number | null;
       winner_team_id: string | null;
+      status: string | null;
     };
     const allMatches = (allMatchesData ?? []) as RealMatch[];
 
     const matchByNum = new Map<number, RealMatch>();
     for (const mm of allMatches) {
-      // external_id format: "wc2026-m73" — extract trailing match number after the last 'm'
-      const match = mm.external_id ? String(mm.external_id).match(/m(\d{2,3})\b/i) : null;
-      const num = match ? parseInt(match[1], 10) : NaN;
-      if (Number.isFinite(num)) matchByNum.set(num, mm);
+      const matchNum = matchNumberFromRealMatch(mm);
+      if (matchNum) matchByNum.set(matchNum, mm);
     }
     const groupMatches = allMatches.filter((m) => m.stage === "group");
-
-    function loserOf(matchNum: number): string | null {
-      const real = matchByNum.get(matchNum);
-      if (!real || !real.winner_team_id) return null;
-      if (real.winner_team_id === real.home_team_id) return real.away_team_id;
-      if (real.winner_team_id === real.away_team_id) return real.home_team_id;
-      return null;
-    }
 
     // All group predictions to compute per-user qualifier sets.
     const { data: allGroupPredsData } = await supabase
@@ -333,35 +166,36 @@ Deno.serve(async (req) => {
       predsByUser.set(p.user_id, arr);
     }
     const userQualifiersCache = new Map<string, Set<string>>();
+    const userQualifierResultCache = new Map<string, QualifierResult>();
+    function getUserQualifierResult(userId: string): QualifierResult {
+      let result = userQualifierResultCache.get(userId);
+      if (result) return result;
+      const ups = predsByUser.get(userId) ?? [];
+      result = computeQualifiers(teams, groupMatches, ups);
+      userQualifierResultCache.set(userId, result);
+      return result;
+    }
     function getUserQualifiers(userId: string): Set<string> {
       let s = userQualifiersCache.get(userId);
       if (s) return s;
-      const ups = predsByUser.get(userId) ?? [];
-      s = computeQualifiedIds(teams, groupMatches, ups);
+      s = new Set(getUserQualifierResult(userId).qualified.map((q) => q.team.id));
       userQualifiersCache.set(userId, s);
       return s;
     }
 
     let bracketUpdates = 0;
-    for (const pool of pools) {
-      const sourceBonusForMatch = (matchNum: number): number => {
-        if (matchNum >= 73 && matchNum <= 88) return pool.bonus_round_of_32 ?? 0;
-        if (matchNum >= 89 && matchNum <= 96) return pool.bonus_round_of_16 ?? 0;
-        if (matchNum >= 97 && matchNum <= 100) return pool.bonus_quarter ?? 0;
-        if (matchNum === 101 || matchNum === 102) return pool.bonus_semi ?? 0;
-        if (matchNum === 103) return pool.bonus_third_place ?? 0;
-        if (matchNum === 104) return pool.bonus_final ?? 0;
-        return 0;
-      };
+    let championUpdates = 0;
+    for (const pool of pools as PoolRow[]) {
+      const scoring = normalizeScoring(pool);
 
       // Per-user lookup of bracket picks → keyed by `${stage}-${slot}` → team_id
       const { data: brackets } = await supabase
         .from("bracket_predictions")
-        .select("*")
+        .select("id, user_id, stage, slot, team_id, home_score, away_score")
         .eq("pool_id", pool.id);
 
       const picksByUser = new Map<string, Map<string, string | null>>();
-      for (const b of brackets ?? []) {
+      for (const b of (brackets ?? []) as BracketPredictionRow[]) {
         const m = picksByUser.get(b.user_id) ?? new Map<string, string | null>();
         m.set(`${b.stage}-${b.slot}`, b.team_id);
         picksByUser.set(b.user_id, m);
@@ -371,14 +205,53 @@ Deno.serve(async (req) => {
         if (!sto) return null;
         return picksByUser.get(userId)?.get(`${sto.stage}-${sto.slot}`) ?? null;
       };
+      const predictedLoser = (
+        participants: [string | null, string | null] | null,
+        winnerId: string | null,
+      ): string | null => {
+        if (!participants || !winnerId) return null;
+        const [home, away] = participants;
+        if (winnerId === home) return away;
+        if (winnerId === away) return home;
+        return null;
+      };
+      const predictedParticipantsForMatch = (
+        userId: string,
+        matchNum: number,
+      ): [string | null, string | null] | null => {
+        if (matchNum >= 73 && matchNum <= 88) {
+          const spec = R32.find((row) => row.match === matchNum);
+          if (!spec) return null;
+          const qualifiers = getUserQualifierResult(userId);
+          return [
+            resolveR32Slot(spec.a, qualifiers, matchNum),
+            resolveR32Slot(spec.b, qualifiers, matchNum),
+          ];
+        }
+        if (matchNum === 103) {
+          const semi101 = predictedParticipantsForMatch(userId, 101);
+          const semi102 = predictedParticipantsForMatch(userId, 102);
+          return [
+            predictedLoser(semi101, userPickForMatch(userId, 101)),
+            predictedLoser(semi102, userPickForMatch(userId, 102)),
+          ];
+        }
+        const srcs = BRACKET_SOURCE_MATCHES[matchNum];
+        return srcs ? [userPickForMatch(userId, srcs[0]), userPickForMatch(userId, srcs[1])] : null;
+      };
 
-      for (const b of brackets ?? []) {
+      for (const b of (brackets ?? []) as BracketPredictionRow[]) {
         let pts = 0;
+        if (!isCanonicalBracketStageSlot(b.stage, b.slot)) {
+          await supabase.from("bracket_predictions").update({ points: 0 }).eq("id", b.id);
+          bracketUpdates++;
+          continue;
+        }
         const matchNum = bracketMatchNum(b.stage, b.slot);
         const real = matchNum != null ? matchByNum.get(matchNum) : undefined;
 
         if (matchNum != null && real) {
-          const bonus = sourceBonusForMatch(matchNum);
+          let sourceHits = 0;
 
           if (matchNum === 103) {
             // 3rd place: each slot row independently — check if pick matches one of
@@ -387,16 +260,15 @@ Deno.serve(async (req) => {
               const realTeams = new Set(
                 [real.home_team_id, real.away_team_id].filter(Boolean) as string[],
               );
-              if (realTeams.has(b.team_id)) pts += bonus;
+              if (realTeams.has(b.team_id)) sourceHits += 1;
             }
           } else if (matchNum >= 73 && matchNum <= 88) {
-            // R32: source is groups → count real teams in user's qualifier set.
             const qualSet = getUserQualifiers(b.user_id);
-            if (real.home_team_id && qualSet.has(real.home_team_id)) pts += bonus;
-            if (real.away_team_id && qualSet.has(real.away_team_id)) pts += bonus;
+            if (real.home_team_id && qualSet.has(real.home_team_id)) sourceHits += 1;
+            if (real.away_team_id && qualSet.has(real.away_team_id)) sourceHits += 1;
           } else {
             // R16, QF, SF, Final: source = 2 previous match winners.
-            const srcs = SOURCE_MATCHES[matchNum];
+            const srcs = BRACKET_SOURCE_MATCHES[matchNum];
             if (srcs && real.home_team_id && real.away_team_id) {
               const [srcA, srcB] = srcs;
               // The home team of `real` came from srcA, away from srcB
@@ -405,36 +277,22 @@ Deno.serve(async (req) => {
               const pickA = userPickForMatch(b.user_id, srcA);
               const pickB = userPickForMatch(b.user_id, srcB);
               if (pickA && (pickA === real.home_team_id || pickA === real.away_team_id)) {
-                pts += bonus;
+                sourceHits += 1;
               }
               if (pickB && (pickB === real.home_team_id || pickB === real.away_team_id)) {
-                pts += bonus;
+                sourceHits += 1;
               }
             }
           }
 
-          // Score (placar exato/VC+PE/VCPI) bonus — only when winner pick is correct
-          // and the user provided scores on the bracket row.
-          if (
-            b.team_id &&
-            real.winner_team_id &&
-            real.winner_team_id === b.team_id &&
-            real.home_score != null &&
-            real.away_score != null &&
-            b.home_score != null &&
-            b.away_score != null
-          ) {
-            // Bracket scores are stored in the displayed/official match order
-            // (home slot vs away slot), regardless of which team the user
-            // picked as winner. Compare directly without swapping.
-            pts += scoreMatch(
-              b.home_score,
-              b.away_score,
-              real.home_score,
-              real.away_score,
-              defaultCfg,
-            );
-          }
+          pts = scoreBracketRowPoints({
+            matchNum,
+            pick: b,
+            real,
+            predictedParticipants: predictedParticipantsForMatch(b.user_id, matchNum),
+            sourceHits,
+            scoring,
+          }).total;
         }
 
         await supabase.from("bracket_predictions").update({ points: pts }).eq("id", b.id);
@@ -447,6 +305,8 @@ Deno.serve(async (req) => {
         .select("home_team_id, away_team_id, home_score, away_score, winner_team_id, status")
         .eq("stage", "final")
         .eq("status", "finished")
+        .order("kickoff_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
 
       let championTeamId: string | null = null;
@@ -462,20 +322,31 @@ Deno.serve(async (req) => {
       }
       const { data: champs } = await supabase
         .from("champion_predictions")
-        .select("*")
+        .select("id, team_id")
         .eq("pool_id", pool.id);
-      for (const c of champs ?? []) {
-        const pts = championTeamId && c.team_id === championTeamId ? pool.bonus_champion : 0;
+      for (const c of (champs ?? []) as ChampionPredictionRow[]) {
+        const pts = championTeamId && c.team_id === championTeamId ? scoring.bonus_champion : 0;
         await supabase.from("champion_predictions").update({ points: pts }).eq("id", c.id);
+        championUpdates++;
       }
     }
 
-    return ok({ predictions: predUpdates, brackets: bracketUpdates });
+    return ok({ predictions: predUpdates, brackets: bracketUpdates, champions: championUpdates });
   } catch (e) {
     console.error(e);
     const msg = e instanceof Error ? e.message : "unknown error";
+
+    const status = e instanceof AdminAuthError ? e.status : 500;
+
+    if (e instanceof AdminAuthError) {
+      return new Response(JSON.stringify({ ok: false, error: msg }), {
+        status: e.status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     return new Response(JSON.stringify({ ok: false, error: msg }), {
-      status: 500,
+      status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }

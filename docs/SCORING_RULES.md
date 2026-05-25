@@ -21,6 +21,8 @@ The app tracks team hits across:
 - Final
 - Champion
 
+For knockout matches, phase points are awarded only when the user's predicted matchup has the same two teams as the official matchup. Team order does not matter: `Portugal x Alemanha` and `Alemanha x Portugal` are treated as the same matchup.
+
 The ranking table displays counts and points by phase. The scoring function recalculates stored prediction points after results are updated.
 
 ## Payment Eligibility
